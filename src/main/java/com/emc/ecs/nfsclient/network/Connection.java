@@ -18,15 +18,15 @@ import com.emc.ecs.nfsclient.rpc.RpcException;
 import com.emc.ecs.nfsclient.rpc.RpcStatus;
 import com.emc.ecs.nfsclient.rpc.Xdr;
 
-import org.jboss.netty.bootstrap.ClientBootstrap;
-import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelFuture;
-import org.jboss.netty.channel.ChannelFutureListener;
-import org.jboss.netty.channel.ChannelHandler;
-import org.jboss.netty.channel.ChannelPipeline;
-import org.jboss.netty.channel.ChannelPipelineFactory;
-import org.jboss.netty.channel.Channels;
-import org.jboss.netty.channel.socket.nio.NioSocketChannelConfig;
+import io.netty.bootstrap.Bootstrap;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelInitializer;
+import io.netty.channel.ChannelOption;
+import io.netty.channel.ChannelPromise;
+import io.netty.channel.EventLoopGroup;
+import io.netty.channel.socket.SocketChannel;
+import io.netty.channel.socket.nio.NioSocketChannel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,17 +41,6 @@ import java.util.concurrent.TimeUnit;
  * @author seibed
  */
 public class Connection {
-
-    /**
-     * Key for getting the connection from the helper map.
-     */
-    static final String CONNECTION_OPTION = "bourneLocalConn";
-
-    /**
-     * Key for getting the remote address from the helper map.
-     */
-    static final String REMOTE_ADDRESS_OPTION = "remoteAddress";
-
     /**
      * The usual logger.
      */
@@ -76,17 +65,12 @@ public class Connection {
     /**
      * Netty helper instance.
      */
-    private final ClientBootstrap _clientBootstrap;
+    private final Bootstrap _bootstrap;
 
     /**
      * Netty channel representing a tcp connection.
      */
     private Channel _channel;
-
-    /**
-     * Netty helper instance.
-     */
-    ChannelFuture _channelFuture = Channels.future(null, true);
 
     /**
      * The remote server address, in any form.
@@ -96,7 +80,7 @@ public class Connection {
     /**
      * The remote server port being used.
      */
-    private final int _port;
+    private final int _remotePort;
 
     /**
      * <ul><li>
@@ -110,30 +94,16 @@ public class Connection {
     /**
      * Store the ChannelFuture instances while they are in progress. The map is final, but the content will change.
      */
-    private final ConcurrentHashMap<Integer, ChannelFuture> _futureMap = new ConcurrentHashMap<Integer, ChannelFuture>();
+    private final ConcurrentHashMap<Integer, ChannelPromise> _futureMap = new ConcurrentHashMap<>();
 
     /**
      * Store the Xdr response instances while they are in progress. The map is final, but the content will change.
      */
-    private final ConcurrentHashMap<Integer, Xdr> _responseMap = new ConcurrentHashMap<Integer, Xdr>();
-
-    /**
-     * Simple enums for communicating connection states.
-     * 
-     * @author seibed
-     */
-    public enum State {
-        DISCONNECTED, CONNECTING, CONNECTED;
-    }
-
-    /**
-     * The current state.
-     */
-    private State _state = State.DISCONNECTED;
+    private final ConcurrentHashMap<Integer, Xdr> _responseMap = new ConcurrentHashMap<>();
 
     /**
      * @param remoteHost A unique name for the host to which the connection is being made.
-     * @param port The remote host port being used for the connection.
+     * @param rmotePort The remote host port being used for the connection.
      * @param usePrivilegedPort
      *            <ul>
      *            <li>If <code>true</code>, use a privileged port (below 1024)
@@ -142,57 +112,22 @@ public class Connection {
      *            communication.</li>
      *            </ul>
      */
-    public Connection(String remoteHost, int port, boolean usePrivilegedPort) {
+    public Connection(String remoteHost, int rmotePort, boolean usePrivilegedPort, EventLoopGroup workerGroup) {
         _remoteHost = remoteHost;
-        _port = port;
+        _remotePort = rmotePort;
         _usePrivilegedPort = usePrivilegedPort;
-        _clientBootstrap = new ClientBootstrap(NetMgr.getInstance().getFactory());
-        // Configure the client.
-        _clientBootstrap.setOption(REMOTE_ADDRESS_OPTION, new InetSocketAddress(_remoteHost, _port));
-        _clientBootstrap.setOption("connectTimeoutMillis", CONNECT_TIMEOUT);  // set
-                                                                              // connection
-                                                                              // timeout
-                                                                              // value
-                                                                              // to
-                                                                              // 10
-                                                                              // seconds
-        _clientBootstrap.setOption("tcpNoDelay", true);
-        _clientBootstrap.setOption("keepAlive", true);
-        _clientBootstrap.setOption(CONNECTION_OPTION, this);
-
-        // Configure the pipeline factory.
-        _clientBootstrap.setPipelineFactory(new ChannelPipelineFactory() {
-
-            /**
-             * Netty helper instance.
-             */
-            private final ChannelHandler ioHandler = new ClientIOHandler(_clientBootstrap);
-
-            /* (non-Javadoc)
-             * @see org.jboss.netty.channel.ChannelPipelineFactory#getPipeline()
-             */
-            public ChannelPipeline getPipeline() throws Exception {
-                return Channels.pipeline(new RPCRecordDecoder(), ioHandler);
+        _bootstrap = new Bootstrap();
+        _bootstrap.group(workerGroup);
+        _bootstrap.option(ChannelOption.TCP_NODELAY, true);
+        _bootstrap.option(ChannelOption.SO_KEEPALIVE, true);
+        _bootstrap.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, CONNECT_TIMEOUT);
+        _bootstrap.channel(NioSocketChannel.class);
+        _bootstrap.handler(new ChannelInitializer<SocketChannel>() {
+            @Override
+            protected void initChannel(SocketChannel ch) {
+                ch.pipeline().addLast(new RPCRecordDecoder(), new ClientIOHandler(Connection.this));
             }
         });
-    }
-
-    /**
-     * Convenience getter method.
-     * 
-     * @return The remote server internet address.
-     */
-    public InetSocketAddress getRemoteAddress() {
-        return (InetSocketAddress) _clientBootstrap.getOption(REMOTE_ADDRESS_OPTION);
-    }
-
-    /**
-     * Convenience getter method.
-     * 
-     * @return The state.
-     */
-    public State getConnectionState() {
-        return _state;
     }
 
     /**
@@ -215,47 +150,31 @@ public class Connection {
      * @param xdrRequest
      *            The generic RPC data and protocol-specific data.
      * @return The Xdr data for the response.
-     * @throws RpcException
+     * @throws RpcException if something went wrong
      */
     public Xdr sendAndWait(int timeout, Xdr xdrRequest) throws RpcException {
-        // no lock is required here.
-        // The status may be changed after the checking,
-        // or there exists a small window that the status is not consistent to
-        // the actual tcp connection state.
-        // Both above cases will not cause any issues.
-        if (_state.equals(State.CONNECTED) == false) {
-            _channelFuture.awaitUninterruptibly();
-            if (_channelFuture.isSuccess() == false) {
-
-                String msg = String.format("waiting for connection to be established, but failed %s",
-                        getRemoteAddress());
-                LOG.error(msg);
-
-                // return RpcException, the exact reason should already be
-                // logged in IOHandler::exceptionCaught()
-                throw new RpcException(RpcStatus.NETWORK_ERROR, msg);
-            }
+        if (_channel == null) {
+            throw new IllegalStateException("Connection is not opened");
         }
 
         // check whether the internal queue of netty has enough spaces to hold
         // the request
         // False means that the too many pending requests are in the queue or
         // the connection is closed.
-        if (_channel.isWritable() == false) {
+        if (!_channel.isWritable()) {
             String msg;
-            if (_channel.isConnected()) {
+            if (_channel.isActive()) {
                 msg = String.format("too many pending requests for the connection: %s", getRemoteAddress());
             } else {
                 msg = String.format("the connection is broken: %s", getRemoteAddress());
             }
-
             // too many pending request are in the queue, return error
             throw new RpcException(RpcStatus.NETWORK_ERROR, msg);
         }
 
         // put the request into a map for timeout management
-        ChannelFuture timeoutFuture = Channels.future(_channel);
-        Integer xid = Integer.valueOf(xdrRequest.getXid());
+        ChannelPromise timeoutFuture = _channel.newPromise();
+        Integer xid = xdrRequest.getXid();
         _futureMap.put(xid, timeoutFuture);
 
         // put the request into the queue of the netty, netty will send data
@@ -268,9 +187,8 @@ public class Connection {
         Xdr response = _responseMap.remove(xid);
         _futureMap.remove(xid);
 
-        if (timeoutFuture.isSuccess() == false) {
-
-            LOG.warn("cause:", timeoutFuture.getCause());
+        if (!timeoutFuture.isSuccess()) {
+            LOG.warn("cause:", timeoutFuture.cause());
 
             if (timeoutFuture.isDone()) {
                 String msg = String.format("tcp IO error on the connection: %s", getRemoteAddress());
@@ -280,55 +198,27 @@ public class Connection {
                 throw new RpcException(RpcStatus.NETWORK_ERROR, msg);
             }
         }
-
         return response;
     }
 
     /**
      * If there is no current connection, start a new tcp connection asynchronously.
      * 
-     * @throws RpcException
+     * @throws RpcException if connection fails
      */
     protected void connect() throws RpcException {
-        if (_state.equals(State.CONNECTED)) {
+        if (_channel != null) {
             return;
         }
-
-        final ChannelFuture oldChannelFuture = _channelFuture;
-
         if (LOG.isDebugEnabled()) {
-            String logPrefix = _usePrivilegedPort ? "usePrivilegedPort " : "";
-            LOG.debug("{}connecting to {}", logPrefix, getRemoteAddress());
+            LOG.debug("Connecting to {} using privileged port: {}", getRemoteAddress(), _usePrivilegedPort);
         }
-        _state = State.CONNECTING;
-
         if (_usePrivilegedPort) {
-            _channel = bindToPrivilegedPort();
-            _channelFuture = _channel.connect(getRemoteAddress());
-        } else {
-            _channelFuture = _clientBootstrap.connect();
-            _channel = _channelFuture.getChannel();
+            bindToPrivilegedPort();
         }
-
-        NioSocketChannelConfig cfg = (NioSocketChannelConfig) _channel.getConfig();
-        cfg.setWriteBufferHighWaterMark(MAX_SENDING_QUEUE_SIZE);
-
-        _channelFuture.addListener(new ChannelFutureListener() {
-            /* (non-Javadoc)
-             * @see org.jboss.netty.channel.ChannelFutureListener#operationComplete(org.jboss.netty.channel.ChannelFuture)
-             */
-            public void operationComplete(ChannelFuture future) {
-                if (_channelFuture.isSuccess()) {
-                    _state = State.CONNECTED;
-                    oldChannelFuture.setSuccess();
-                } else {
-                    _state = State.DISCONNECTED;
-                    oldChannelFuture.cancel();
-                }
-
-            }
-        });
-
+        ChannelFuture connectFuture = _bootstrap.connect(_remoteHost, _remotePort).syncUninterruptibly();
+        _channel = connectFuture.channel();
+        _channel.config().setWriteBufferHighWaterMark(MAX_SENDING_QUEUE_SIZE);
     }
 
     /**
@@ -344,12 +234,10 @@ public class Connection {
      * This is called when the connection should be closed.
      */
     protected void close() {
-        _state = State.DISCONNECTED;
-
         shutdown();
 
         // remove the connection from map
-        NetMgr.getInstance().dropConnection(InetSocketAddress.createUnresolved(_remoteHost, _port));
+        NetMgr.getInstance().dropConnection(InetSocketAddress.createUnresolved(_remoteHost, _remotePort));
 
         // notify all the pending requests in the timeout map
         notifyAllPendingSenders("Channel closed, connection closing.");
@@ -363,7 +251,7 @@ public class Connection {
      * @param response
      */
     protected void notifySender(Integer xid, Xdr response) {
-        ChannelFuture future = _futureMap.get(xid);
+        ChannelPromise future = _futureMap.get(xid);
         if (future != null) {
             _responseMap.put(xid, response);
             future.setSuccess();
@@ -374,48 +262,40 @@ public class Connection {
      * Notify all the senders of all pending requests
      */
     protected void notifyAllPendingSenders(String message) {
-        for (ChannelFuture future : _futureMap.values()) {
+        for (ChannelPromise future : _futureMap.values()) {
             future.setFailure(new Error(message));
         }
     }
 
+    private String getRemoteAddress() {
+        return _remoteHost + ':' + _remotePort;
+    }
+
     /**
-     * This attempts to bind to privileged ports, starting with 1023 and working downwards, and returns when the first binding succeeds.
-     * 
+     * This attempts to bind to privileged ports, starting with 1023 and working
+     * downwards, and returns when the first binding succeeds.
+     *
      * <p>
      * Some NFS servers apparently may require that some requests originate on
      * an Internet port below IPPORT_RESERVED (1024). This is generally not
      * used, though, as the client then has to run as a user authorized for
      * privileged, which is dangerous. It is also not generally needed.
      * </p>
-     * 
-     * @return
-     *         <ul>
-     *         <li><code>true</code> if the binding succeeds,</li>
-     *         <li><code>false</code> otherwise.</li>
-     *         </ul>
+     *
      * @throws RpcException If an exception occurs, or if no binding succeeds.
      */
-    private Channel bindToPrivilegedPort() throws RpcException {
-        System.out.println("Attempting to use privileged port.");
+    private void bindToPrivilegedPort() throws RpcException {
         for (int port = 1023; port > 0; --port) {
             try {
-                ChannelPipeline pipeline = _clientBootstrap.getPipelineFactory().getPipeline();
-                Channel channel = _clientBootstrap.getFactory().newChannel(pipeline);
-                channel.getConfig().setOptions(_clientBootstrap.getOptions());
-                ChannelFuture bindFuture = channel.bind(new InetSocketAddress(port)).awaitUninterruptibly();
+                ChannelFuture bindFuture = _bootstrap.bind(port).sync();
                 if (bindFuture.isSuccess()) {
-                    System.out.println("Success! Bound to port " + port);
-                    return bindFuture.getChannel();
+                    return;
                 }
             } catch (Exception e) {
-                String msg = String.format("rpc request bind error for address: %s", 
-                        getRemoteAddress());
+                String msg = String.format("rpc request bind error for address: %s", port);
                 throw new RpcException(RpcStatus.NETWORK_ERROR, msg, e);
             }
         }
-
-        throw new RpcException(RpcStatus.LOCAL_BINDING_ERROR, String.format("Cannot bind a port < 1024: %s", getRemoteAddress()));
+        throw new RpcException(RpcStatus.LOCAL_BINDING_ERROR, "Cannot bind a port < 1024");
     }
-
 }

@@ -16,16 +16,11 @@ package com.emc.ecs.nfsclient.network;
 
 import com.emc.ecs.nfsclient.rpc.Xdr;
 
-import org.jboss.netty.bootstrap.ClientBootstrap;
-import org.jboss.netty.channel.ChannelHandlerContext;
-import org.jboss.netty.channel.ChannelStateEvent;
-import org.jboss.netty.channel.ExceptionEvent;
-import org.jboss.netty.channel.MessageEvent;
-import org.jboss.netty.channel.SimpleChannelHandler;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.net.InetSocketAddress;
 import java.nio.channels.NotYetConnectedException;
 
 /**
@@ -35,17 +30,12 @@ import java.nio.channels.NotYetConnectedException;
  * 
  * @author seibed
  */
-public class ClientIOHandler extends SimpleChannelHandler {
+public class ClientIOHandler extends ChannelInboundHandlerAdapter {
 
     /**
      * The usual logger.
      */
     private static final Logger LOG = LoggerFactory.getLogger(ClientIOHandler.class);
-
-    /**
-     * The Netty helper class object.
-     */
-    private final ClientBootstrap _clientBootstrap;
 
     /**
      * The connection instance
@@ -58,106 +48,34 @@ public class ClientIOHandler extends SimpleChannelHandler {
      * @param bootstrap
      *            A Netty helper instance.
      */
-    public ClientIOHandler(ClientBootstrap bootstrap) {
-        _clientBootstrap = bootstrap;
-        _connection = (Connection) bootstrap.getOption(Connection.CONNECTION_OPTION);
+    public ClientIOHandler(Connection connection) {
+        _connection = connection;
     }
 
-    /**
-     * Convenience getter method.
-     * 
-     * @return The address.
-     */
-    public InetSocketAddress getRemoteAddress() {
-        return (InetSocketAddress) _clientBootstrap.getOption(Connection.REMOTE_ADDRESS_OPTION);
-    }
-
-    /*
-     * (non-Javadoc)
-     * 
-     * @see
-     * org.jboss.netty.channel.SimpleChannelHandler#channelConnected(org.jboss.
-     * netty.channel.ChannelHandlerContext,
-     * org.jboss.netty.channel.ChannelStateEvent)
-     */
-    public void channelConnected(ChannelHandlerContext ctx, ChannelStateEvent e) throws Exception {
+    @Override
+    public void channelActive(ChannelHandlerContext ctx) {
         if (LOG.isDebugEnabled()) {
-            LOG.debug("Connected to: {}", getRemoteAddress());
+            LOG.debug("Connected to: {}", ctx.channel().remoteAddress());
         }
     }
 
-    /*
-     * (non-Javadoc)
-     * 
-     * @see
-     * org.jboss.netty.channel.SimpleChannelHandler#channelDisconnected(org.
-     * jboss.netty.channel.ChannelHandlerContext,
-     * org.jboss.netty.channel.ChannelStateEvent)
-     */
-    public void channelDisconnected(ChannelHandlerContext ctx, ChannelStateEvent e) throws Exception {
-        closeConnection("Channel disconnected");
-    }
-
-    /*
-     * (non-Javadoc)
-     * 
-     * @see
-     * org.jboss.netty.channel.SimpleChannelHandler#channelClosed(org.jboss.
-     * netty.channel.ChannelHandlerContext,
-     * org.jboss.netty.channel.ChannelStateEvent)
-     */
-    public void channelClosed(ChannelHandlerContext ctx, ChannelStateEvent e) throws Exception {
-        closeConnection("Channel closed");
-    }
-
-    /**
-     * Convenience method to standardize connection closing.We never try to
-     * reconnect the tcp connections. the new connection will be launched when
-     * new request is received. Reasons:
-     * <ol>
-     * <li>Portmap service will disconnect a tcp connection once it has been
-     * idle for a few seconds.</li>
-     * <li>Mounting service is listening to a temporary port, the port will
-     * change after nfs server restart.</li>
-     * <li>Even Nfs server may be listening to a temporary port.</li>
-     * </ol>
-     * 
-     * @param messageStart
-     *            A string used to start the log message.
-     */
-    private void closeConnection(String messageStart) {
-        LOG.warn(messageStart + ": {}", getRemoteAddress());
+    @Override
+    public void channelInactive(ChannelHandlerContext ctx) {
+        LOG.warn("Channel inactive: {}", ctx.channel().remoteAddress());
         _connection.close();
     }
 
-    /*
-     * (non-Javadoc)
-     * 
-     * @see
-     * org.jboss.netty.channel.SimpleChannelHandler#messageReceived(org.jboss.
-     * netty.channel.ChannelHandlerContext,
-     * org.jboss.netty.channel.MessageEvent)
-     */
-    public void messageReceived(ChannelHandlerContext ctx, MessageEvent e) throws Exception {
-        byte[] rpcResponse = (byte[]) e.getMessage();
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) {
+        byte[] rpcResponse = (byte[]) msg;
         // remove marking
         Xdr x = RecordMarkingUtil.removeRecordMarking(rpcResponse);
         // remove the request from timeout manager map
-        int xid = x.getXid();
-        _connection.notifySender(Integer.valueOf(xid), x);
+        _connection.notifySender(x.getXid(), x);
     }
 
-    /*
-     * (non-Javadoc)
-     * 
-     * @see
-     * org.jboss.netty.channel.SimpleChannelHandler#exceptionCaught(org.jboss.
-     * netty.channel.ChannelHandlerContext,
-     * org.jboss.netty.channel.ExceptionEvent)
-     */
-    public void exceptionCaught(ChannelHandlerContext ctx, ExceptionEvent e) throws Exception {
-        Throwable cause = e.getCause();
-
+    @Override
+    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         // do not print exception if it is BindException.
         // we are trying to search available port below 1024. It is not good to
         // print a flood
@@ -166,13 +84,7 @@ public class ClientIOHandler extends SimpleChannelHandler {
             return;
         }
 
-        LOG.error("Exception on connection to " + getRemoteAddress(), e.getCause());
-
-        // close the channel unless we are connecting and it is
-        // NotYetConnectedException
-        if (!((cause instanceof NotYetConnectedException)
-                && _connection.getConnectionState().equals(Connection.State.CONNECTING))) {
-            ctx.getChannel().close();
-        }
+        LOG.error("Exception on connection to " + ctx.channel().remoteAddress(), cause.getCause());
+        ctx.channel().close();
     }
 }

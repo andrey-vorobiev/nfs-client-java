@@ -16,15 +16,12 @@ package com.emc.ecs.nfsclient.network;
 
 import com.emc.ecs.nfsclient.rpc.RpcException;
 import com.emc.ecs.nfsclient.rpc.Xdr;
-
-import org.jboss.netty.channel.ChannelFactory;
-import org.jboss.netty.channel.socket.nio.NioClientSocketChannelFactory;
+import io.netty.channel.EventLoopGroup;
+import io.netty.channel.nio.NioEventLoopGroup;
 
 import java.net.InetSocketAddress;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 
 /**
@@ -56,41 +53,14 @@ public class NetMgr {
     /**
      * connection tracking map
      */
-    private ConcurrentHashMap<InetSocketAddress, Connection> _connectionMap = new ConcurrentHashMap<InetSocketAddress, Connection>();
+    private final ConcurrentHashMap<InetSocketAddress, Connection> _connectionMap = new ConcurrentHashMap<>();
 
     /**
      * privileged connection tracking map
      */
-    private ConcurrentHashMap<InetSocketAddress, Connection> _privilegedConnectionMap = new ConcurrentHashMap<InetSocketAddress, Connection>();
+    private final ConcurrentHashMap<InetSocketAddress, Connection> _privilegedConnectionMap = new ConcurrentHashMap<>();
 
-    /**
-     * Netty helper instance.
-     */
-    private ChannelFactory _factory = new NioClientSocketChannelFactory(newThreadPool(), newThreadPool());
-
-    /**
-     * @return a thread pool instance using the proper factory to create daemon threads
-     */
-    private static final ExecutorService newThreadPool() {
-        return Executors.newCachedThreadPool(getThreadFactory());
-    }
-
-    /**
-     * @return a thread factory that creates daemon threads
-     */
-    private static ThreadFactory getThreadFactory() {
-        return new ThreadFactory() {
-
-            @Override
-            public Thread newThread(Runnable r) {
-                Thread thread = new Thread(r);
-                thread.setDaemon(true);
-                return thread;
-            }
-
-        };
-
-    }
+    private final EventLoopGroup workerGroup = new NioEventLoopGroup(getThreadFactory());
 
     /**
      * Basic RPC call functionality only. Send the request, creating a new
@@ -120,7 +90,7 @@ public class NetMgr {
         Map<InetSocketAddress, Connection> connectionMap = usePrivilegedPort ? _privilegedConnectionMap : _connectionMap;
         Connection connection = connectionMap.get(key);
         if (connection == null) {
-            connection = new Connection(serverIP, port, usePrivilegedPort);
+            connection = new Connection(serverIP, port, usePrivilegedPort, workerGroup);
             connectionMap.put(key, connection);
             connection.connect();
         }
@@ -151,15 +121,21 @@ public class NetMgr {
             connection.shutdown();
         }
 
-        _factory.releaseExternalResources();
+        workerGroup.shutdownGracefully();
     }
 
     /**
-     * Getter method for Factory access.
-     * 
-     * @return The factory.
+     * @return a thread factory that creates daemon threads
      */
-    public ChannelFactory getFactory() {
-        return _factory;
+    private static ThreadFactory getThreadFactory() {
+        return new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread thread = new Thread(r);
+                thread.setDaemon(true);
+                return thread;
+            }
+
+        };
     }
 }
